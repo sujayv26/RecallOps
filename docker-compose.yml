@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: recallops-postgres
+    environment:
+      - POSTGRES_USER=recallops
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=recallops
+    ports:
+      - "5432:5432"
+    volumes:
+      - recallops-db:/var/lib/postgresql/data
+    networks:
+      - recallops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recallops -d recallops"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # Backend API - FastAPI
   backend:
     build:
@@ -17,17 +38,20 @@ services:
       - BACKEND_PORT=8000
       - BACKEND_URL=http://backend:8000
       - FRONTEND_URL=http://frontend:8501
-      - DATABASE_URL=sqlite:///./recallops.db
+      - DATABASE_URL=postgresql://recallops:password@postgres:5432/recallops
       - ENVIRONMENT=development
       - LOG_LEVEL=INFO
+      - MOCK_MODE=${MOCK_MODE:-false}
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app/backend
       - ./data:/app/data
-      - recallops-db:/app/data
     networks:
       - recallops-network
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=5)"]

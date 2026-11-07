@@ -1,35 +1,47 @@
 """Groq LLM integration - the ONLY file that talks to Groq.
 
 Handles prompt construction, structured output parsing, and error handling.
+
+IMPORTANT: Mock mode is EXPLICITLY controlled by MOCK_MODE environment variable.
+Never silently fall back to mock - fail loudly if Groq is unavailable and not in mock mode.
 """
 
 import json
-import os
-from typing import Optional, List
+
 from pydantic import ValidationError
 
 from backend.config import settings
 from backend.models import (
-    AgentAnalysisInput,
     AgentAnalysisOutput,
-    IncidentInput,
     HistoricalMatch,
+    IncidentInput,
 )
-
 
 # ============================================================================
 # Groq Client Setup
 # ============================================================================
 
 _groq_client = None
+_groq_initialized = False
 
 
 def _get_groq_client():
-    """Get or create the Groq client."""
-    global _groq_client
+    """Get or create the Groq client.
 
-    if _groq_client is not None:
+    Raises:
+        RuntimeError: If Groq is not configured and not in mock mode.
+    """
+    global _groq_client, _groq_initialized
+
+    if _groq_initialized:
         return _groq_client
+
+    _groq_initialized = True
+
+    # In mock mode, return None to signal mock implementations should be used
+    if settings.mock_mode:
+        _groq_client = None
+        return None
 
     try:
         from groq import Groq  # type: ignore
@@ -37,18 +49,28 @@ def _get_groq_client():
         _groq_client = Groq(api_key=settings.groq_api_key)
         return _groq_client
 
-    except ImportError:
-        print("[Groq] Groq SDK not installed. Install with: pip install groq")
-        return None
-
+    except ImportError as e:
+        raise RuntimeError(
+            "Groq SDK not installed. Install with: pip install groq "
+            "or set MOCK_MODE=true for development without Groq."
+        ) from e
     except Exception as e:
-        print(f"[Groq] Failed to initialize client: {e}")
-        return None
+        raise RuntimeError(
+            f"Failed to initialize Groq client: {e}. "
+            f"Check GROQ_API_KEY and GROQ_MODEL. "
+            f"Or set MOCK_MODE=true for development."
+        ) from e
 
 
 def is_groq_available() -> bool:
-    """Check if Groq is configured and available."""
-    return _get_groq_client() is not None
+    """Check if Groq is configured and available (not in mock mode)."""
+    if settings.mock_mode:
+        return False
+    try:
+        client = _get_groq_client()
+        return client is not None
+    except RuntimeError:
+        return False
 
 
 # ============================================================================
@@ -97,7 +119,7 @@ Consider:
 Remember: Historical matches are VERIFIED FACTS. Your analysis is a HYPOTHESIS."""
 
 
-def _format_historical_context(matches: List[HistoricalMatch]) -> str:
+def _format_historical_context(matches: list[HistoricalMatch]) -> str:
     """Format historical matches for the prompt."""
     if not matches:
         return "No relevant historical incidents found in team memory."
@@ -115,7 +137,7 @@ def _format_historical_context(matches: List[HistoricalMatch]) -> str:
     return "\n".join(lines)
 
 
-def _build_user_prompt(incident: IncidentInput, matches: List[HistoricalMatch]) -> str:
+def _build_user_prompt(incident: IncidentInput, matches: list[HistoricalMatch]) -> str:
     """Build the user prompt with incident details and historical context."""
     log_section = f"Log Excerpt:\n{incident.log_excerpt}\n" if incident.log_excerpt else "Log Excerpt: (none provided)\n"
     historical_context = _format_historical_context(matches)
@@ -134,7 +156,7 @@ def _build_user_prompt(incident: IncidentInput, matches: List[HistoricalMatch]) 
 
 def analyze_incident(
     incident: IncidentInput,
-    historical_matches: List[HistoricalMatch]
+    historical_matches: list[HistoricalMatch]
 ) -> AgentAnalysisOutput:
     """
     Analyze an incident using Groq LLM with historical context.
@@ -147,13 +169,14 @@ def analyze_incident(
         Structured analysis output
 
     Raises:
-        RuntimeError: If Groq is unavailable or response parsing fails
+        RuntimeError: If Groq is unavailable and not in mock mode, or response parsing fails
     """
     client = _get_groq_client()
 
     if client is None:
-        # Fallback mock analysis for demo
-        return _mock_analysis(incident, historical_matches)
+        if settings.mock_mode:
+            return _mock_analysis(incident, historical_matches)
+        raise RuntimeError("Groq client not available and MOCK_MODE=false")
 
     user_prompt = _build_user_prompt(incident, historical_matches)
 
@@ -164,42 +187,43 @@ def analyze_incident(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1,  # Low temperature for consistent structured output
+            temperature=0.1,
             max_tokens=2000,
-            response_format={"type": "json_object"}  # Enforce JSON output
+            response_format={"type": "json_object"}
         )
 
         content = response.choices[0].message.content
         if not content:
             raise RuntimeError("Empty response from Groq")
 
-        # Parse and validate JSON output
         parsed = json.loads(content)
         return AgentAnalysisOutput(**parsed)
 
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Groq returned invalid JSON: {e}")
+        raise RuntimeError(f"Groq returned invalid JSON: {e}") from e
 
     except ValidationError as e:
-        raise RuntimeError(f"Groq response failed schema validation: {e}")
+        raise RuntimeError(f"Groq response failed schema validation: {e}") from e
 
     except Exception as e:
-        raise RuntimeError(f"Groq API error: {e}")
+        raise RuntimeError(f"Groq API error: {e}") from e
 
 
 # ============================================================================
-# Mock Analysis (for demo when Groq unavailable)
+# Mock Analysis - ONLY used when MOCK_MODE=true
 # ============================================================================
 
 def _mock_analysis(
     incident: IncidentInput,
-    historical_matches: List[HistoricalMatch]
+    historical_matches: list[HistoricalMatch]
 ) -> AgentAnalysisOutput:
-    """Generate a mock analysis for demo purposes."""
-    service = incident.service_name.lower()
+    """Generate a mock analysis for demo purposes.
+
+    ONLY called when MOCK_MODE=true. Clearly labeled as mock data.
+    """
+    incident.service_name.lower()
     error_desc = incident.error_description.lower()
 
-    # Determine severity based on keywords
     if any(kw in error_desc for kw in ["critical", "down", "outage", "500", "503", "timeout"]):
         severity = "High"
     elif any(kw in error_desc for kw in ["slow", "degraded", "latency", "401", "403"]):
@@ -207,7 +231,6 @@ def _mock_analysis(
     else:
         severity = "Low"
 
-    # Check for historical matches
     has_memory = len(historical_matches) > 0
     top_match = historical_matches[0] if historical_matches else None
 
@@ -232,7 +255,6 @@ def _mock_analysis(
             "Document any differences from historical incident for future learning"
         ]
     else:
-        # Generic analysis based on symptoms
         if "database" in error_desc or "connection" in error_desc or "pool" in error_desc:
             likely_cause = "Database connection pool exhaustion or connection leak"
             actions = [

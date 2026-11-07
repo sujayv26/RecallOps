@@ -7,12 +7,11 @@ pydantic-settings==2.6.1
 # LLM Integration
 groq==0.6.0
 
-# Memory (Hindsight) - install per documentation
-# hindsight-sdk==...
-
-# Database (optional SQLite for audit)
+# Database - PostgreSQL with async support
 sqlalchemy==2.0.34
 alembic==1.13.1
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
 
 # Utilities
 python-dotenv==1.0.1

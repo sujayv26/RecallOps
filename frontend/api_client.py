@@ -1,10 +1,10 @@
 """API client for Streamlit frontend - ONLY talks to FastAPI backend."""
 
 import os
-import requests
-from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
+from typing import Any
 
+import requests
 
 # Configuration
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
@@ -15,7 +15,7 @@ class APIResponse:
     """Standardized API response wrapper."""
     success: bool
     data: Any = None
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class RecallOpsAPIClient:
@@ -59,7 +59,7 @@ class RecallOpsAPIClient:
         self,
         service_name: str,
         error_description: str,
-        log_excerpt: Optional[str] = None
+        log_excerpt: str | None = None
     ) -> APIResponse:
         """Submit incident for analysis."""
         payload = {
@@ -97,7 +97,7 @@ class RecallOpsAPIClient:
         incident_id: str,
         verified_root_cause: str,
         verified_resolution: str,
-        notes: Optional[str] = None
+        notes: str | None = None
     ) -> APIResponse:
         """Submit human-confirmed resolution."""
         payload = {
@@ -151,7 +151,7 @@ class RecallOpsAPIClient:
 
 
 # Singleton instance
-_api_client: Optional[RecallOpsAPIClient] = None
+_api_client: RecallOpsAPIClient | None = None
 
 
 def get_api_client() -> RecallOpsAPIClient:

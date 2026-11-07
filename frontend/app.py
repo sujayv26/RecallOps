@@ -1,12 +1,10 @@
 """Streamlit frontend for RecallOps - Incident Response AI Agent."""
 
-import streamlit as st
-import uuid
 from datetime import datetime
-from typing import Optional
 
-from frontend.api_client import get_api_client, APIResponse
+import streamlit as st
 
+from frontend.api_client import get_api_client
 
 # ============================================================================
 # Page Configuration
@@ -131,9 +129,15 @@ with st.sidebar:
                 if health.success:
                     st.success("Backend Healthy")
                     deps = health.data.get("dependencies", {})
-                    for dep, status in deps.items():
-                        icon = "✅" if status == "connected" else "⚠️"
-                        st.write(f"{icon} {dep}: {status}")
+                    for dep, status_val in deps.items():
+                        if dep == "mock_mode":
+                            if status_val:
+                                st.warning("🧪 Mock Mode: ENABLED (using mock implementations)")
+                            else:
+                                st.success("🧪 Mock Mode: DISABLED (using real services)")
+                        else:
+                            icon = "✅" if status_val == "connected" else "⚠️" if status_val == "mock_mode" else "❌"
+                            st.write(f"{icon} {dep}: {status_val}")
                 else:
                     st.error(f"Backend Unavailable: {health.error}")
 
@@ -308,7 +312,7 @@ if page == "📝 Analyze Incident":
                     st.success("✅ Verified resolution saved to team memory!")
                     st.balloons()
                     # Show confirmation
-                    st.markdown(f"""
+                    st.markdown("""
                     <div class="verified-box">
                         <strong>💾 Verified Learning Stored</strong><br>
                         <span class="verified-badge">✅ VERIFIED</span><br>
@@ -343,8 +347,8 @@ elif page == "📚 Memory Explorer":
 
         if memories:
             # Filter options
-            services = sorted(set(m.get("service_name", "Unknown") for m in memories))
-            selected_service = st.selectbox("Filter by Service", ["All"] + services)
+            services = sorted({m.get("service_name", "Unknown") for m in memories})
+            selected_service = st.selectbox("Filter by Service", ["All", *services])
 
             filtered = memories if selected_service == "All" else [
                 m for m in memories if m.get("service_name") == selected_service
@@ -352,7 +356,7 @@ elif page == "📚 Memory Explorer":
 
             for memory in filtered:
                 with st.expander(f"{memory.get('incident_id', 'Unknown')} — {memory.get('service_name', 'Unknown')}"):
-                    st.markdown(f"""
+                    st.markdown("""
                     <div class="verified-box">
                         <span class="verified-badge">✅ VERIFIED</span>
                     </div>

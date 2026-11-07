@@ -7,9 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install system dependencies (including postgresql client for asyncpg/psycopg2)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -27,7 +28,7 @@ COPY backend/ ./backend/
 COPY data/ ./data/
 COPY pyproject.toml .
 
-# Create directory for SQLite
+# Create directory for any runtime files
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user

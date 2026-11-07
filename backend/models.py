@@ -1,9 +1,9 @@
 """Pydantic request/response schemas - the shared API contract."""
 
 from datetime import datetime
-from typing import Optional, List, Literal
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
 
+from pydantic import BaseModel, Field
 
 # ============================================================================
 # Request/Response Models
@@ -13,7 +13,7 @@ class IncidentInput(BaseModel):
     """Input for incident analysis request."""
     service_name: str = Field(..., min_length=1, max_length=100, description="Name of the affected service")
     error_description: str = Field(..., min_length=10, max_length=5000, description="Description of the incident/error")
-    log_excerpt: Optional[str] = Field(default=None, max_length=10000, description="Optional log excerpt or context")
+    log_excerpt: str | None = Field(default=None, max_length=10000, description="Optional log excerpt or context")
 
 
 class HistoricalMatch(BaseModel):
@@ -23,8 +23,8 @@ class HistoricalMatch(BaseModel):
     symptom: str = Field(..., description="Symptom/description of the historical incident")
     root_cause: str = Field(..., description="Verified root cause of the historical incident")
     resolution: str = Field(..., description="Verified resolution steps")
-    similarity_score: Optional[float] = Field(default=None, description="Semantic similarity score if available")
-    created_at: Optional[datetime] = Field(default=None, description="When this memory was stored")
+    similarity_score: float | None = Field(default=None, description="Semantic similarity score if available")
+    created_at: datetime | None = Field(default=None, description="When this memory was stored")
 
 
 class AnalysisResponse(BaseModel):
@@ -33,11 +33,11 @@ class AnalysisResponse(BaseModel):
     severity: Literal["Low", "Medium", "High", "Critical"] = Field(..., description="Assessed severity level")
     likely_root_cause: str = Field(..., description="AI's hypothesized root cause")
     explanation: str = Field(..., description="Detailed explanation of the analysis")
-    recommended_actions: List[str] = Field(..., min_length=1, description="Ordered list of recommended investigation/remediation steps")
+    recommended_actions: list[str] = Field(..., min_length=1, description="Ordered list of recommended investigation/remediation steps")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Model-estimated confidence (0-1), not a guarantee")
-    historical_matches: List[HistoricalMatch] = Field(default_factory=list, description="Actual retrieved historical incidents from Hindsight")
+    historical_matches: list[HistoricalMatch] = Field(default_factory=list, description="Actual retrieved historical incidents from Hindsight")
     memory_influence: str = Field(default="", description="How retrieved memory influenced this analysis")
-    caveats: Optional[str] = Field(default=None, description="Missing information or limitations in the analysis")
+    caveats: str | None = Field(default=None, description="Missing information or limitations in the analysis")
     analyzed_at: datetime = Field(default_factory=datetime.utcnow, description="Timestamp of analysis")
 
 
@@ -46,13 +46,13 @@ class ResolutionInput(BaseModel):
     incident_id: str = Field(..., description="The incident ID from the analysis response")
     verified_root_cause: str = Field(..., min_length=5, max_length=2000, description="Human-confirmed actual root cause")
     verified_resolution: str = Field(..., min_length=5, max_length=5000, description="Human-confirmed actual resolution steps")
-    notes: Optional[str] = Field(default=None, max_length=2000, description="Additional notes from the responder")
+    notes: str | None = Field(default=None, max_length=2000, description="Additional notes from the responder")
 
 
 class ResolutionResponse(BaseModel):
     """Response after storing verified resolution."""
     success: bool = Field(..., description="Whether the resolution was stored successfully")
-    memory_id: Optional[str] = Field(default=None, description="Hindsight memory ID if available")
+    memory_id: str | None = Field(default=None, description="Hindsight memory ID if available")
     message: str = Field(..., description="Status message")
 
 
@@ -70,7 +70,7 @@ class MemoryListItem(BaseModel):
 
 class MemoryListResponse(BaseModel):
     """Response for memory listing."""
-    memories: List[MemoryListItem] = Field(default_factory=list)
+    memories: list[MemoryListItem] = Field(default_factory=list)
     total: int = Field(default=0)
 
 
@@ -79,12 +79,12 @@ class InsightItem(BaseModel):
     theme: str = Field(..., description="Pattern/theme name")
     description: str = Field(..., description="Description of the pattern")
     incident_count: int = Field(..., description="Number of related incidents")
-    example_incidents: List[str] = Field(default_factory=list, description="Example incident IDs")
+    example_incidents: list[str] = Field(default_factory=list, description="Example incident IDs")
 
 
 class InsightsResponse(BaseModel):
     """Response for insights endpoint."""
-    insights: List[InsightItem] = Field(default_factory=list)
+    insights: list[InsightItem] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -103,7 +103,7 @@ class HealthResponse(BaseModel):
 class AgentAnalysisInput(BaseModel):
     """Internal input to the agent analysis function."""
     incident: IncidentInput
-    historical_context: List[HistoricalMatch]
+    historical_context: list[HistoricalMatch]
 
 
 class AgentAnalysisOutput(BaseModel):
@@ -111,10 +111,10 @@ class AgentAnalysisOutput(BaseModel):
     severity: Literal["Low", "Medium", "High", "Critical"]
     likely_root_cause: str
     explanation: str
-    recommended_actions: List[str]
+    recommended_actions: list[str]
     confidence: float
     memory_influence: str
-    caveats: Optional[str] = None
+    caveats: str | None = None
 
 
 # ============================================================================

@@ -2,77 +2,87 @@
 
 This module handles all Hindsight operations: retain, recall, and reflect.
 Isolate Hindsight SDK calls here to protect against API changes.
+
+IMPORTANT: Mock mode is EXPLICITLY controlled by MOCK_MODE environment variable.
+Never silently fall back to mock - fail loudly if Hindsight is unavailable and not in mock mode.
 """
 
-import os
 import uuid
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from backend.config import settings
-from backend.models import HistoricalMatch, IncidentInput, InsightItem
-
+from backend.models import HistoricalMatch, InsightItem
 
 # ============================================================================
 # Hindsight Client Setup
 # ============================================================================
 
-# Lazy import to avoid hard dependency at module load
 _hindsight_client = None
-_hindsight_available = None
+_hindsight_initialized = False
 
 
 def _get_hindsight_client():
-    """Get or create the Hindsight client."""
-    global _hindsight_client, _hindsight_available
+    """Get or create the Hindsight client.
 
-    if _hindsight_available is False:
-        return None
+    Raises:
+        RuntimeError: If Hindsight is not configured and not in mock mode.
+    """
+    global _hindsight_client, _hindsight_initialized
 
-    if _hindsight_client is not None:
+    if _hindsight_initialized:
         return _hindsight_client
+
+    _hindsight_initialized = True
+
+    # In mock mode, return None to signal mock implementations should be used
+    if settings.mock_mode:
+        _hindsight_client = None
+        return None
 
     try:
         # Try to import Hindsight SDK
-        # The exact import depends on the SDK version - adjust as needed
         from hindsight import HindsightClient  # type: ignore
 
         _hindsight_client = HindsightClient(
             api_key=settings.hindsight_api_key,
             base_url=settings.hindsight_base_url
         )
-        _hindsight_available = True
         return _hindsight_client
 
-    except ImportError:
-        # Hindsight SDK not installed - use mock mode for demo
-        _hindsight_available = False
-        _hindsight_client = None
-        return None
-
+    except ImportError as e:
+        raise RuntimeError(
+            "Hindsight SDK not installed. Install with: pip install hindsight-sdk "
+            "or set MOCK_MODE=true for development without Hindsight."
+        ) from e
     except Exception as e:
-        # Configuration error or connection issue
-        print(f"[Hindsight] Failed to initialize client: {e}")
-        _hindsight_available = False
-        _hindsight_client = None
-        return None
+        raise RuntimeError(
+            f"Failed to initialize Hindsight client: {e}. "
+            f"Check HINDSIGHT_API_KEY, HINDSIGHT_BASE_URL, HINDSIGHT_BANK_ID. "
+            f"Or set MOCK_MODE=true for development."
+        ) from e
 
 
 def is_hindsight_available() -> bool:
-    """Check if Hindsight is configured and available."""
-    client = _get_hindsight_client()
-    return client is not None
+    """Check if Hindsight is configured and available (not in mock mode)."""
+    if settings.mock_mode:
+        return False
+    try:
+        client = _get_hindsight_client()
+        return client is not None
+    except RuntimeError:
+        return False
 
 
 # ============================================================================
-# Memory Operations
+# Memory Operations - All raise on failure unless in mock mode
 # ============================================================================
 
 def recall_memories(
     query: str,
-    service_name: Optional[str] = None,
+    service_name: str | None = None,
     limit: int = 5
-) -> List[HistoricalMatch]:
+) -> list[HistoricalMatch]:
     """
     Recall relevant historical incidents from Hindsight.
 
@@ -82,32 +92,30 @@ def recall_memories(
         limit: Maximum number of results
 
     Returns:
-        List of HistoricalMatch objects (empty if Hindsight unavailable)
+        List of HistoricalMatch objects
+
+    Raises:
+        RuntimeError: If Hindsight unavailable and not in mock mode.
     """
     client = _get_hindsight_client()
 
     if client is None:
-        # Mock mode - return empty list, demo data handled separately
-        return _mock_recall(query, service_name, limit)
+        if settings.mock_mode:
+            return _mock_recall(query, service_name, limit)
+        raise RuntimeError("Hindsight client not available and MOCK_MODE=false")
 
     try:
-        # The exact Hindsight SDK method may vary - check current docs
-        # Common patterns: client.recall(), client.search(), bank.recall()
         bank = client.bank(settings.hindsight_bank_id)
 
-        # Build search query
         search_query = query
         if service_name:
             search_query = f"service:{service_name} {query}"
 
         # Call Hindsight recall - adjust method name per SDK version
-        # Typical: bank.recall(query=search_query, limit=limit)
         results = bank.recall(query=search_query, limit=limit)
 
-        # Parse results into HistoricalMatch objects
         matches = []
         for item in results:
-            # Hindsight result structure varies - adapt to actual response
             match = _parse_hindsight_result(item)
             if match:
                 matches.append(match)
@@ -115,9 +123,9 @@ def recall_memories(
         return matches
 
     except Exception as e:
-        print(f"[Hindsight] Recall failed: {e}")
-        # Fall back to mock for demo continuity
-        return _mock_recall(query, service_name, limit)
+        if settings.mock_mode:
+            return _mock_recall(query, service_name, limit)
+        raise RuntimeError(f"Hindsight recall failed: {e}") from e
 
 
 def retain_memory(
@@ -126,12 +134,12 @@ def retain_memory(
     symptom: str,
     verified_root_cause: str,
     verified_resolution: str,
-    metadata: Optional[Dict[str, Any]] = None
-) -> Optional[str]:
+    metadata: dict[str, Any] | None = None
+) -> str | None:
     """
     Retain a verified incident outcome in Hindsight.
 
-    Only call this with HUMAN-CONFIRMED resolutions. Never store AI hypotheses.
+    ONLY call this with HUMAN-CONFIRMED resolutions. Never store AI hypotheses.
 
     Args:
         incident_id: Unique incident identifier
@@ -142,18 +150,21 @@ def retain_memory(
         metadata: Optional additional metadata
 
     Returns:
-        Hindsight memory ID if successful, None otherwise
+        Hindsight memory ID if successful, None if failed (in mock mode)
+
+    Raises:
+        RuntimeError: If Hindsight unavailable and not in mock mode.
     """
     client = _get_hindsight_client()
 
     if client is None:
-        # Mock mode
-        return _mock_retain(incident_id, service_name, symptom, verified_root_cause, verified_resolution)
+        if settings.mock_mode:
+            return _mock_retain(incident_id, service_name, symptom, verified_root_cause, verified_resolution)
+        raise RuntimeError("Hindsight client not available and MOCK_MODE=false")
 
     try:
         bank = client.bank(settings.hindsight_bank_id)
 
-        # Build memory content - structure per Hindsight requirements
         content = f"""Incident: {incident_id}
 Service: {service_name}
 Symptom: {symptom}
@@ -167,40 +178,42 @@ Verified Resolution: {verified_resolution}"""
                 "service_name": service_name,
                 "type": "verified_incident_resolution",
                 "verified": True,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 **(metadata or {})
             }
         }
 
-        # Call Hindsight retain - adjust method per SDK
-        # Typical: bank.add(**memory_data) or bank.retain(...)
         result = bank.add(**memory_data)
 
-        # Extract memory ID from result
         memory_id = result.get("id") or result.get("memory_id") or str(uuid.uuid4())
         return memory_id
 
     except Exception as e:
-        print(f"[Hindsight] Retain failed: {e}")
-        return None
+        if settings.mock_mode:
+            return _mock_retain(incident_id, service_name, symptom, verified_root_cause, verified_resolution)
+        raise RuntimeError(f"Hindsight retain failed: {e}") from e
 
 
-def reflect_patterns(limit: int = 10) -> List[InsightItem]:
+def reflect_patterns(limit: int = 10) -> list[InsightItem]:
     """
     Get recurring patterns/themes from Hindsight reflection.
 
     Returns:
-        List of InsightItem objects (empty if not supported/unavailable)
+        List of InsightItem objects
+
+    Raises:
+        RuntimeError: If Hindsight unavailable and not in mock mode.
     """
     client = _get_hindsight_client()
 
     if client is None:
-        return _mock_reflect(limit)
+        if settings.mock_mode:
+            return _mock_reflect(limit)
+        raise RuntimeError("Hindsight client not available and MOCK_MODE=false")
 
     try:
         bank = client.bank(settings.hindsight_bank_id)
 
-        # Check if reflection is supported - method varies by SDK version
         if hasattr(bank, "reflect"):
             results = bank.reflect(limit=limit)
         elif hasattr(bank, "patterns"):
@@ -217,16 +230,19 @@ def reflect_patterns(limit: int = 10) -> List[InsightItem]:
         return insights
 
     except Exception as e:
-        print(f"[Hindsight] Reflect failed: {e}")
-        return []
+        if settings.mock_mode:
+            return _mock_reflect(limit)
+        raise RuntimeError(f"Hindsight reflect failed: {e}") from e
 
 
-def list_memories(limit: int = 50, offset: int = 0) -> List[HistoricalMatch]:
+def list_memories(limit: int = 50, offset: int = 0) -> list[HistoricalMatch]:
     """List stored memories from Hindsight (if supported)."""
     client = _get_hindsight_client()
 
     if client is None:
-        return _mock_list_memories(limit, offset)
+        if settings.mock_mode:
+            return _mock_list_memories(limit, offset)
+        raise RuntimeError("Hindsight client not available and MOCK_MODE=false")
 
     try:
         bank = client.bank(settings.hindsight_bank_id)
@@ -247,30 +263,31 @@ def list_memories(limit: int = 50, offset: int = 0) -> List[HistoricalMatch]:
         return matches
 
     except Exception as e:
-        print(f"[Hindsight] List memories failed: {e}")
-        return []
+        if settings.mock_mode:
+            return _mock_list_memories(limit, offset)
+        raise RuntimeError(f"Hindsight list memories failed: {e}") from e
 
 
 # ============================================================================
-# Mock Implementations (for demo when Hindsight unavailable)
+# Mock Implementations - ONLY used when MOCK_MODE=true
 # ============================================================================
 
 def _mock_recall(
     query: str,
-    service_name: Optional[str],
+    service_name: str | None,
     limit: int
-) -> List[HistoricalMatch]:
-    """Mock recall for demo - returns synthetic seed data matches."""
-    # This simulates what Hindsight would return with seeded data
-    # In real implementation, this comes from the Hindsight bank
+) -> list[HistoricalMatch]:
+    """Mock recall for demo - returns synthetic seed data matches.
+
+    ONLY called when MOCK_MODE=true. Clearly labeled as mock data.
+    """
     from data.sample_incidents import SAMPLE_INCIDENTS
 
     matches = []
     query_lower = query.lower()
 
     for inc in SAMPLE_INCIDENTS:
-        # Simple keyword matching for demo
-        score = 0
+        score: float = 0.0
         if service_name and inc["service"].lower() == service_name.lower():
             score += 0.5
         if any(word in inc["symptom"].lower() for word in query_lower.split()):
@@ -286,10 +303,9 @@ def _mock_recall(
                 root_cause=inc["root_cause"],
                 resolution=inc["resolution"],
                 similarity_score=round(min(score, 0.95), 2),
-                created_at=datetime.utcnow()
+                created_at=datetime.now(UTC)
             ))
 
-    # Sort by similarity and limit
     matches.sort(key=lambda x: x.similarity_score or 0, reverse=True)
     return matches[:limit]
 
@@ -301,14 +317,19 @@ def _mock_retain(
     verified_root_cause: str,
     verified_resolution: str
 ) -> str:
-    """Mock retain - returns a fake memory ID."""
-    memory_id = f"mem_{uuid.uuid4().hex[:12]}"
-    print(f"[Mock Hindsight] Retained memory {memory_id} for incident {incident_id}")
+    """Mock retain - returns a fake memory ID.
+
+    ONLY called when MOCK_MODE=true.
+    """
+    memory_id = f"mem_mock_{uuid.uuid4().hex[:12]}"
     return memory_id
 
 
-def _mock_reflect(limit: int) -> List[InsightItem]:
-    """Mock reflection - returns synthetic patterns."""
+def _mock_reflect(limit: int) -> list[InsightItem]:
+    """Mock reflection - returns synthetic patterns.
+
+    ONLY called when MOCK_MODE=true.
+    """
     return [
         InsightItem(
             theme="Database Connection Pool Exhaustion",
@@ -331,8 +352,11 @@ def _mock_reflect(limit: int) -> List[InsightItem]:
     ][:limit]
 
 
-def _mock_list_memories(limit: int, offset: int) -> List[HistoricalMatch]:
-    """Mock list memories for demo."""
+def _mock_list_memories(limit: int, offset: int) -> list[HistoricalMatch]:
+    """Mock list memories for demo.
+
+    ONLY called when MOCK_MODE=true.
+    """
     from data.sample_incidents import SAMPLE_INCIDENTS
 
     matches = []
@@ -344,37 +368,43 @@ def _mock_list_memories(limit: int, offset: int) -> List[HistoricalMatch]:
             root_cause=inc["root_cause"],
             resolution=inc["resolution"],
             similarity_score=None,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(UTC)
         ))
     return matches
 
 
-def _parse_hindsight_result(item: Any) -> Optional[HistoricalMatch]:
+def _parse_hindsight_result(item: Any) -> HistoricalMatch | None:
     """Parse a raw Hindsight result into HistoricalMatch."""
+    if item is None:
+        return None
     try:
-        # Adapt to actual Hindsight response structure
-        # This is a placeholder - adjust based on real SDK response
         content = item.get("content", "") if isinstance(item, dict) else str(item)
         metadata = item.get("metadata", {}) if isinstance(item, dict) else {}
 
-        # Try to extract structured data from content or metadata
-        incident_id = metadata.get("incident_id", f"mem_{uuid.uuid4().hex[:8]}")
-        service_name = metadata.get("service_name", "Unknown")
+        incident_id = metadata.get("incident_id")
+        service_name = metadata.get("service_name")
         symptom = metadata.get("symptom", "")
         root_cause = metadata.get("verified_root_cause", "")
         resolution = metadata.get("verified_resolution", "")
 
-        # If not in metadata, try parsing from content
-        if not symptom and content:
-            # Basic parsing attempt
+        if content:
             lines = content.split("\n")
             for line in lines:
-                if line.startswith("Symptom:"):
+                if line.startswith("Incident:") and not incident_id:
+                    incident_id = line.replace("Incident:", "").strip()
+                elif line.startswith("Service:") and not service_name:
+                    service_name = line.replace("Service:", "").strip()
+                elif line.startswith("Symptom:") and not symptom:
                     symptom = line.replace("Symptom:", "").strip()
-                elif line.startswith("Verified Root Cause:"):
+                elif line.startswith("Verified Root Cause:") and not root_cause:
                     root_cause = line.replace("Verified Root Cause:", "").strip()
-                elif line.startswith("Verified Resolution:"):
+                elif line.startswith("Verified Resolution:") and not resolution:
                     resolution = line.replace("Verified Resolution:", "").strip()
+
+        if not incident_id:
+            incident_id = f"mem_{uuid.uuid4().hex[:8]}"
+        if not service_name:
+            service_name = "Unknown"
 
         return HistoricalMatch(
             incident_id=incident_id,
@@ -384,12 +414,11 @@ def _parse_hindsight_result(item: Any) -> Optional[HistoricalMatch]:
             resolution=resolution or "Unknown resolution",
             similarity_score=item.get("score") if isinstance(item, dict) else None,
         )
-    except Exception as e:
-        print(f"[Hindsight] Failed to parse result: {e}")
+    except Exception:
         return None
 
 
-def _parse_hindsight_insight(item: Any) -> Optional[InsightItem]:
+def _parse_hindsight_insight(item: Any) -> InsightItem | None:
     """Parse a raw Hindsight reflection result into InsightItem."""
     try:
         if isinstance(item, dict):

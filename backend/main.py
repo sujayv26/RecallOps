@@ -1,41 +1,59 @@
 """FastAPI application - main entry point and API routes."""
 
 import uuid
-from datetime import datetime
-from typing import Optional
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from backend.config import settings
-from backend.models import (
-    IncidentInput,
-    AnalysisResponse,
-    ResolutionInput,
-    ResolutionResponse,
-    MemoryListResponse,
-    InsightsResponse,
-    HealthResponse,
-    HistoricalMatch,
-)
-from backend.memory import (
-    recall_memories,
-    retain_memory,
-    reflect_patterns,
-    list_memories,
-    is_hindsight_available,
-)
 from backend.agent import analyze_incident, is_groq_available
+from backend.config import settings
 from backend.database import (
-    init_db,
+    close_db,
     create_analysis_record,
     create_resolution_record,
+    get_all_resolutions,
     get_analysis_by_incident_id,
     get_resolution_by_incident_id,
-    get_all_resolutions,
+    init_db,
 )
+from backend.memory import (
+    is_hindsight_available,
+    list_memories,
+    recall_memories,
+    reflect_patterns,
+    retain_memory,
+)
+from backend.models import (
+    AnalysisResponse,
+    HealthResponse,
+    HistoricalMatch,
+    IncidentInput,
+    InsightsResponse,
+    MemoryListItem,
+    MemoryListResponse,
+    ResolutionInput,
+    ResolutionResponse,
+)
+
+# ============================================================================
+# Lifespan Handler
+# ============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup and shutdown."""
+    # Startup
+    await init_db()
+    # Check dependencies
+    is_hindsight_available()
+    is_groq_available()
+    yield
+    # Shutdown
+    await close_db()
 
 
 # ============================================================================
@@ -48,6 +66,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS for Streamlit frontend
@@ -61,28 +80,11 @@ app.add_middleware(
 
 
 # ============================================================================
-# Startup/Shutdown Events
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database and verify connections on startup."""
-    init_db()
-    print("[Startup] Database initialized")
-
-    # Check dependencies
-    hindsight_ok = is_hindsight_available()
-    groq_ok = is_groq_available()
-    print(f"[Startup] Hindsight: {'connected' if hindsight_ok else 'mock mode'}")
-    print(f"[Startup] Groq: {'connected' if groq_ok else 'mock mode'}")
-
-
-# ============================================================================
 # Dependency Injection
 # ============================================================================
 
 def get_current_timestamp() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ============================================================================
@@ -92,19 +94,23 @@ def get_current_timestamp() -> str:
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Service health check with dependency status."""
-    hindsight_status = "connected" if is_hindsight_available() else "mock_mode"
-    groq_status = "connected" if is_groq_available() else "mock_mode"
+    hindsight_status = "connected" if is_hindsight_available() else ("mock_mode" if settings.mock_mode else "unavailable")
+    groq_status = "connected" if is_groq_available() else ("mock_mode" if settings.mock_mode else "unavailable")
+    db_status = "connected"
 
     overall = "healthy"
-    if hindsight_status == "mock_mode" or groq_status == "mock_mode":
+    if hindsight_status != "connected" or groq_status != "connected":
         overall = "degraded"
 
     return HealthResponse(
         status=overall,  # type: ignore
+        version="0.1.0",
+        timestamp=datetime.now(UTC),
         dependencies={
             "hindsight": hindsight_status,
             "groq": groq_status,
-            "database": "connected",
+            "database": db_status,
+            "mock_mode": settings.mock_mode,
         }
     )
 
@@ -164,7 +170,7 @@ async def analyze_incident_endpoint(incident: IncidentInput):
         )
 
         # Step 4: Store analysis in local audit DB
-        create_analysis_record(
+        await create_analysis_record(
             incident_id=incident_id,
             service_name=incident.service_name,
             error_description=incident.error_description,
@@ -185,17 +191,17 @@ async def analyze_incident_endpoint(incident: IncidentInput):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Validation error: {e}"
-        )
+        ) from e
     except RuntimeError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Analysis failed: {e}"
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal error: {e}"
-        )
+        ) from e
 
 
 # ============================================================================
@@ -222,7 +228,7 @@ async def confirm_resolution(resolution: ResolutionInput):
     4. Return confirmation
     """
     # Verify the analysis exists
-    analysis = get_analysis_by_incident_id(resolution.incident_id)
+    analysis = await get_analysis_by_incident_id(resolution.incident_id)
     if not analysis:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -244,7 +250,7 @@ async def confirm_resolution(resolution: ResolutionInput):
         )
 
         # Store in local audit DB
-        create_resolution_record(
+        await create_resolution_record(
             analysis_id=analysis["id"],
             incident_id=resolution.incident_id,
             verified_root_cause=resolution.verified_root_cause,
@@ -259,11 +265,16 @@ async def confirm_resolution(resolution: ResolutionInput):
             message="Verified resolution stored in team memory" if memory_id else "Resolution recorded locally (Hindsight unavailable)"
         )
 
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to store resolution: {e}"
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store resolution: {e}"
-        )
+        ) from e
 
 
 # ============================================================================
@@ -283,47 +294,52 @@ async def get_memories(limit: int = 50, offset: int = 0):
         hindsight_memories = list_memories(limit=limit, offset=offset)
 
         # Get from local DB (verified resolutions)
-        local_resolutions = get_all_resolutions(limit=limit)
+        local_resolutions = await get_all_resolutions(limit=limit)
 
-        # Combine and format
+        # Combine and format as MemoryListItem objects
         memories = []
 
         # Add Hindsight memories
         for m in hindsight_memories:
-            memories.append({
-                "memory_id": f"hindsight_{m.incident_id}",
-                "incident_id": m.incident_id,
-                "service_name": m.service_name,
-                "symptom": m.symptom,
-                "verified_root_cause": m.root_cause,
-                "verified_resolution": m.resolution,
-                "created_at": m.created_at or datetime.utcnow(),
-                "is_verified": True,
-            })
+            memories.append(MemoryListItem(
+                memory_id=f"hindsight_{m.incident_id}",
+                incident_id=m.incident_id,
+                service_name=m.service_name,
+                symptom=m.symptom,
+                verified_root_cause=m.root_cause,
+                verified_resolution=m.resolution,
+                created_at=m.created_at or datetime.now(UTC),
+                is_verified=True,
+            ))
 
         # Add local resolutions
         for r in local_resolutions:
-            memories.append({
-                "memory_id": r.get("memory_id", f"local_{r['id']}"),
-                "incident_id": r["incident_id"],
-                "service_name": "Unknown",  # Would need to join with analysis
-                "symptom": "See analysis",
-                "verified_root_cause": r["verified_root_cause"],
-                "verified_resolution": r["verified_resolution"],
-                "created_at": r["created_at"],
-                "is_verified": True,
-            })
+            memories.append(MemoryListItem(
+                memory_id=r.get("memory_id", f"local_{r['id']}"),
+                incident_id=r["incident_id"],
+                service_name="Unknown",
+                symptom="See analysis",
+                verified_root_cause=r["verified_root_cause"],
+                verified_resolution=r["verified_resolution"],
+                created_at=r["created_at"],
+                is_verified=True,
+            ))
 
         return MemoryListResponse(
-            memories=[MemoryListItem(**m) for m in memories[:limit]],
+            memories=memories[:limit],
             total=len(memories)
         )
 
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to retrieve memories: {e}"
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve memories: {e}"
-        )
+        ) from e
 
 
 @app.get(
@@ -337,11 +353,16 @@ async def get_insights():
     try:
         insights = reflect_patterns(limit=10)
         return InsightsResponse(insights=insights)
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to retrieve insights: {e}"
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve insights: {e}"
-        )
+        ) from e
 
 
 # ============================================================================
@@ -351,14 +372,13 @@ async def get_insights():
 @app.get("/demo/analysis/{incident_id}", response_model=AnalysisResponse, tags=["Demo"])
 async def get_analysis_by_id(incident_id: str):
     """Retrieve a previous analysis by incident ID (for demo comparison)."""
-    analysis = get_analysis_by_incident_id(incident_id)
+    analysis = await get_analysis_by_incident_id(incident_id)
     if not analysis:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Analysis {incident_id} not found"
         )
 
-    # Reconstruct AnalysisResponse from stored data
     historical_matches = [
         HistoricalMatch(**m) for m in analysis["historical_matches"]
     ]
@@ -379,7 +399,7 @@ async def get_analysis_by_id(incident_id: str):
 @app.get("/demo/resolution/{incident_id}", tags=["Demo"])
 async def get_resolution_by_id(incident_id: str):
     """Retrieve a verified resolution by incident ID."""
-    resolution = get_resolution_by_incident_id(incident_id)
+    resolution = await get_resolution_by_incident_id(incident_id)
     if not resolution:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

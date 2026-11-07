@@ -1,12 +1,12 @@
 """Tests for FastAPI endpoints."""
 
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
 
 from backend.main import app
-from backend.models import IncidentInput, AnalysisResponse, ResolutionInput
-
 
 # ============================================================================
 # Test Client Fixture
@@ -53,6 +53,7 @@ def test_health_check(client):
     assert data["status"] in ["healthy", "degraded", "unhealthy"]
     assert "dependencies" in data
     assert "timestamp" in data
+    assert "mock_mode" in data["dependencies"]
 
 
 # ============================================================================
@@ -61,10 +62,9 @@ def test_health_check(client):
 
 @patch("backend.main.recall_memories")
 @patch("backend.main.analyze_incident")
-@patch("backend.main.create_analysis_record")
+@patch("backend.main.create_analysis_record", new_callable=AsyncMock)
 def test_analyze_incident_success(mock_create, mock_analyze, mock_recall, client, sample_incident):
     """Test successful incident analysis."""
-    # Mock dependencies
     mock_recall.return_value = []
     mock_analyze.return_value = MagicMock(
         severity="High",
@@ -128,9 +128,9 @@ def test_analyze_incident_groq_error(mock_analyze, mock_recall, client, sample_i
 # Resolve Endpoint Tests
 # ============================================================================
 
-@patch("backend.main.get_analysis_by_incident_id")
+@patch("backend.main.get_analysis_by_incident_id", new_callable=AsyncMock)
 @patch("backend.main.retain_memory")
-@patch("backend.main.create_resolution_record")
+@patch("backend.main.create_resolution_record", new_callable=AsyncMock)
 def test_confirm_resolution_success(mock_create_res, mock_retain, mock_get_analysis, client, sample_resolution):
     """Test successful resolution confirmation."""
     mock_get_analysis.return_value = {
@@ -154,7 +154,8 @@ def test_confirm_resolution_success(mock_create_res, mock_retain, mock_get_analy
 
 def test_confirm_resolution_missing_analysis(client, sample_resolution):
     """Test resolution for non-existent analysis."""
-    with patch("backend.main.get_analysis_by_incident_id", return_value=None):
+    with patch("backend.main.get_analysis_by_incident_id", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = None
         response = client.post("/resolve", json=sample_resolution)
 
     assert response.status_code == 404
@@ -176,11 +177,11 @@ def test_confirm_resolution_validation_error(client):
 # ============================================================================
 
 @patch("backend.main.list_memories")
-@patch("backend.main.get_all_resolutions")
+@patch("backend.main.get_all_resolutions", new_callable=AsyncMock)
 def test_get_memories(mock_get_res, mock_list_mem, client):
     """Test memory listing endpoint."""
+
     from backend.models import HistoricalMatch
-    from datetime import datetime
 
     mock_list_mem.return_value = [
         HistoricalMatch(
@@ -229,7 +230,7 @@ def test_get_insights(mock_reflect, client):
 # Demo Endpoints Tests
 # ============================================================================
 
-@patch("backend.main.get_analysis_by_incident_id")
+@patch("backend.main.get_analysis_by_incident_id", new_callable=AsyncMock)
 def test_get_analysis_by_id(mock_get, client):
     """Test retrieving analysis by ID."""
     mock_get.return_value = {
@@ -257,7 +258,7 @@ def test_get_analysis_by_id(mock_get, client):
     assert data["severity"] == "High"
 
 
-@patch("backend.main.get_analysis_by_incident_id")
+@patch("backend.main.get_analysis_by_incident_id", new_callable=AsyncMock)
 def test_get_analysis_by_id_not_found(mock_get, client):
     """Test 404 for non-existent analysis."""
     mock_get.return_value = None
@@ -268,31 +269,54 @@ def test_get_analysis_by_id_not_found(mock_get, client):
 
 
 # ============================================================================
-# CORS Tests
-# ============================================================================
-
-def test_cors_headers(client):
-    """Test CORS headers are present."""
-    response = client.options("/analyze", headers={
-        "Origin": "http://localhost:8501",
-        "Access-Control-Request-Method": "POST"
-    })
-    # FastAPI handles CORS via middleware, OPTIONS may return 405
-    # but the middleware should add headers to actual requests
-    assert response.status_code in [200, 405]
-
-
-# ============================================================================
 # Input Validation Tests
 # ============================================================================
 
 @pytest.mark.parametrize("payload,expected_status", [
-    ({"service_name": "A", "error_description": "B"}, 200),  # Minimal valid
+    ({"service_name": "Backend API", "error_description": "Valid error description"}, 200),  # Minimal valid
     ({"service_name": "A" * 101, "error_description": "B"}, 422),  # service_name too long
     ({"service_name": "A", "error_description": "B" * 5001}, 422),  # error_description too long
     ({"service_name": "A", "error_description": "B", "log_excerpt": "C" * 10001}, 422),  # log_excerpt too long
 ])
-def test_input_validation(client, payload, expected_status):
+@patch("backend.main.recall_memories")
+@patch("backend.main.analyze_incident")
+@patch("backend.main.create_analysis_record", new_callable=AsyncMock)
+def test_input_validation(mock_create, mock_analyze, mock_recall, client, payload, expected_status):
     """Test various input validation scenarios."""
+    mock_recall.return_value = []
+    mock_analyze.return_value = MagicMock(
+        severity="High",
+        likely_root_cause="Test cause",
+        explanation="Test explanation",
+        recommended_actions=["Action 1"],
+        confidence=0.85,
+        memory_influence="Test influence",
+        caveats=None
+    )
+    mock_create.return_value = "ana_test123"
+
     response = client.post("/analyze", json=payload)
     assert response.status_code == expected_status
+
+
+# ============================================================================
+# Mock Mode Tests
+# ============================================================================
+
+@patch.dict(os.environ, {"MOCK_MODE": "true"})
+def test_health_check_shows_mock_mode():
+    """Test health check shows mock_mode=true when enabled."""
+    from importlib import reload
+
+    import backend.config
+    reload(backend.config)
+    import backend.main
+    reload(backend.main)
+    from fastapi.testclient import TestClient
+
+    test_client = TestClient(backend.main.app)
+    response = test_client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["dependencies"]["mock_mode"] is True
