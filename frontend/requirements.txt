@@ -1,0 +1,11 @@
+# Frontend Framework
+streamlit==1.40.0
+
+# API Client
+requests==2.32.3
+
+# Utilities
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.3
